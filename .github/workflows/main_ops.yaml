@@ -1,0 +1,135 @@
+name: Production Automation Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+# مجوز برای نوشتن روی gh-pages
+permissions:
+  contents: write
+
+jobs:
+  # ====================================================
+  # JOB 1: PUBLISH TO PYPI (Conditional)
+  # ====================================================
+  publish-pypi:
+    runs-on: ubuntu-latest
+    # شرط: فقط اگر در پیام کامیت عبارت 'pipy commit -push' باشد
+    if: contains(github.event.head_commit.message, 'pipy commit -push')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install Build Tools
+        run: |
+          pip install build twine
+      - name: Build and Publish
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m build
+          twine upload dist/*
+
+  # ====================================================
+  # JOB 2: BUILD & DEPLOY FRONTEND
+  # ====================================================
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20 # استفاده از نسخه پایدار جدید
+
+      - name: Install Dependencies
+        working-directory: ./dashboard
+        run: npm ci # نصب تمیز و سریع
+
+      - name: Build Project
+        working-directory: ./dashboard
+        env:
+          # تزریق آدرس سرور به کد React
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: npm run build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dashboard/dist
+          force_orphan: true # پاک کردن تاریخچه قدیمی برنچ gh-pages برای تمیزی
+
+  # ====================================================
+  # JOB 3: DEPLOY BACKEND TO VPS
+  # ====================================================
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend] # صبر میکند تا فرانت تمام شود
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASS }}
+          script: |
+            # 1. آماده‌سازی محیط
+            cd ~/projects/telegram-bot
+            
+            # تنظیم گیت برای جلوگیری از خطای احراز هویت (چون فقط پول میکنیم نیاز به کردینشال نیست)
+            git config --global --add safe.directory /home/mmd/projects/telegram-bot
+            git reset --hard
+            git pull origin main
+            
+            # 2. فعال‌سازی کاندای موجود
+            source ~/miniconda3/etc/profile.d/conda.sh
+            conda activate tg_bot
+            
+            # 3. نصب وابستگی‌های جدید پایتون
+            pip install -r requirements.txt
+            
+            # 4. بستن هوشمندانه پروسه‌های قبلی
+            # اگر پروسه‌ای نباشد، ارور نمیدهد
+            pkill -f "run_api.py" || true
+            pkill -f "run_worker.py" || true
+            
+            # کمی صبر برای آزاد شدن پورت
+            sleep 3
+            
+            # 5. اجرای مجدد سرویس‌ها با پورت داینامیک (از سکرت نمیخواند، فایل باید درست باشد)
+            # ما فرض میکنیم فایل run_api.py روی پورت 4747 تنظیم شده است.
+            nohup python run_api.py > api.log 2>&1 &
+            nohup python run_worker.py > worker.log 2>&1 &
+            
+            echo "Services restarted successfully."
+
+  # ====================================================
+  # JOB 4: HEALTH CHECK (تست اتصال)
+  # ====================================================
+  health-check:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend]
+    steps:
+      - name: Check API Status
+        env:
+          API_URL: ${{ secrets.VITE_API_URL }}
+        run: |
+          echo "Checking API connectivity at $API_URL/docs..."
+          # تلاش برای اتصال (30 ثانیه صبر میکند)
+          # کد 200 یعنی موفقیت
+          sleep 10
+          status_code=$(curl --write-out %{http_code} --silent --output /dev/null $API_URL/docs)
+          
+          if [ "$status_code" -eq 200 ]; then
+            echo "✅ Backend is ONLINE and reachable!"
+          else
+            echo "❌ Backend Connection Failed! Status Code: $status_code"
+            echo "Check firewall or VPS logs."
+            exit 1
+          fi

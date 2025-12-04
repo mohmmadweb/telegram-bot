@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './App.css'; 
 
-const API_BASE_URL = "http://localhost:8000/api/v1";
-
+const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:4747/api/v1";
 // --- ICONS ---
 const IconSVG = ({ name, size = 18, className, style, color }) => {
     const icons = {
