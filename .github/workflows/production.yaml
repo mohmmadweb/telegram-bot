@@ -1,11 +1,11 @@
-name: Production Automation Pipeline
+name: Production Pipeline
 
 on:
   push:
     branches:
       - main
 
-# مجوز برای نوشتن روی gh-pages
+# Permissions for GitHub Pages deployment
 permissions:
   contents: write
 
@@ -15,18 +15,23 @@ jobs:
   # ====================================================
   publish-pypi:
     runs-on: ubuntu-latest
-    # شرط: فقط اگر در پیام کامیت عبارت 'pipy commit -push' باشد
+    # Condition: Run only if commit message contains specific trigger phrase
     if: contains(github.event.head_commit.message, 'pipy commit -push')
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install Build Tools
         run: |
+          python -m pip install --upgrade pip
           pip install build twine
-      - name: Build and Publish
+
+      - name: Build and Publish Package
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
@@ -35,26 +40,27 @@ jobs:
           twine upload dist/*
 
   # ====================================================
-  # JOB 2: BUILD & DEPLOY FRONTEND
+  # JOB 2: DEPLOY FRONTEND (GitHub Pages)
   # ====================================================
   deploy-frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20 # استفاده از نسخه پایدار جدید
+          node-version: 20
 
       - name: Install Dependencies
         working-directory: ./dashboard
-        run: npm ci # نصب تمیز و سریع
+        run: npm ci
 
-      - name: Build Project
+      - name: Build React App
         working-directory: ./dashboard
         env:
-          # تزریق آدرس سرور به کد React
+          # Inject Server URL from GitHub Secrets into React build
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
         run: npm run build
 
@@ -63,14 +69,14 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dashboard/dist
-          force_orphan: true # پاک کردن تاریخچه قدیمی برنچ gh-pages برای تمیزی
+          force_orphan: true # Clear history for a clean deploy branch
 
   # ====================================================
-  # JOB 3: DEPLOY BACKEND TO VPS
+  # JOB 3: DEPLOY BACKEND (VPS via SSH)
   # ====================================================
   deploy-backend:
     runs-on: ubuntu-latest
-    needs: [deploy-frontend] # صبر میکند تا فرانت تمام شود
+    needs: [deploy-frontend] # Wait for frontend to complete
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -79,57 +85,61 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASS }}
           script: |
-            # 1. آماده‌سازی محیط
-            cd ~/projects/telegram-bot
-            
-            # تنظیم گیت برای جلوگیری از خطای احراز هویت (چون فقط پول میکنیم نیاز به کردینشال نیست)
-            git config --global --add safe.directory /home/mmd/projects/telegram-bot
-            git reset --hard
-            git pull origin main
-            
-            # 2. فعال‌سازی کاندای موجود
+            # 1. Setup Environment Variables
+            export PATH="/home/${{ secrets.VPS_USER }}/miniconda3/bin:$PATH"
             source ~/miniconda3/etc/profile.d/conda.sh
             conda activate tg_bot
             
-            # 3. نصب وابستگی‌های جدید پایتون
-            pip install -r requirements.txt
+            # 2. Navigate to Project Directory
+            cd ~/projects/telegram-bot
             
-            # 4. بستن هوشمندانه پروسه‌های قبلی
-            # اگر پروسه‌ای نباشد، ارور نمیدهد
+            # 3. Pull Latest Code
+            # Reset local changes to avoid conflicts during pull
+            git reset --hard
+            git pull origin main
+            
+            # 4. Install Dependencies
+            pip install -r requirements.txt
+            # Re-install local package to apply setup.py changes
+            pip install .
+            
+            # 5. Stop Old Services
+            echo "Stopping running services..."
             pkill -f "run_api.py" || true
             pkill -f "run_worker.py" || true
             
-            # کمی صبر برای آزاد شدن پورت
+            # Wait for ports to release
             sleep 3
             
-            # 5. اجرای مجدد سرویس‌ها با پورت داینامیک (از سکرت نمیخواند، فایل باید درست باشد)
-            # ما فرض میکنیم فایل run_api.py روی پورت 4747 تنظیم شده است.
+            # 6. Start New Services
+            echo "Starting new services..."
+            # Run API and Worker in background with nohup
             nohup python run_api.py > api.log 2>&1 &
             nohup python run_worker.py > worker.log 2>&1 &
             
-            echo "Services restarted successfully."
+            echo "Backend deployment finished successfully."
 
   # ====================================================
-  # JOB 4: HEALTH CHECK (تست اتصال)
+  # JOB 4: HEALTH CHECK
   # ====================================================
   health-check:
     runs-on: ubuntu-latest
     needs: [deploy-backend]
     steps:
-      - name: Check API Status
+      - name: Verify Backend Connection
         env:
           API_URL: ${{ secrets.VITE_API_URL }}
         run: |
-          echo "Checking API connectivity at $API_URL/docs..."
-          # تلاش برای اتصال (30 ثانیه صبر میکند)
-          # کد 200 یعنی موفقیت
-          sleep 10
-          status_code=$(curl --write-out %{http_code} --silent --output /dev/null $API_URL/docs)
+          echo "Waiting for API to initialize..."
+          sleep 15
           
-          if [ "$status_code" -eq 200 ]; then
-            echo "✅ Backend is ONLINE and reachable!"
+          echo "Checking connectivity to docs endpoint: $API_URL/docs"
+          # Send a request to Swagger docs to verify status 200
+          HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}\n" $API_URL/docs)
+          
+          if [ "$HTTP_STATUS" == "200" ]; then
+            echo "SUCCESS: Backend is ONLINE and reachable."
           else
-            echo "❌ Backend Connection Failed! Status Code: $status_code"
-            echo "Check firewall or VPS logs."
+            echo "FAILED: Backend returned status $HTTP_STATUS"
             exit 1
           fi
