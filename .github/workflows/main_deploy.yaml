@@ -1,0 +1,105 @@
+name: CI/CD Pipeline (PyPI, Pages, VPS)
+
+on:
+  push:
+    branches:
+      - main
+
+# مجوز برای رایت کردن روی Pages
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------
+  # JOB 1: PUBLISH TO PYPI (Conditional)
+  # ---------------------------------------------------
+  publish-pypi:
+    runs-on: ubuntu-latest
+    # فقط اگر کامیت مسیج شامل عبارت خاص بود اجرا شود
+    if: contains(github.event.head_commit.message, 'pipy commit -push')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+      - name: Build and Publish
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m build
+          twine upload dist/*
+
+  # ---------------------------------------------------
+  # JOB 2: DEPLOY FRONTEND TO GITHUB PAGES
+  # ---------------------------------------------------
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install and Build
+        working-directory: ./dashboard
+        env:
+          # اینجا آدرس سرور را به فرانت تزریق میکنیم
+          VITE_API_URL: ${{ secrets.VITE_API_URL }} 
+        run: |
+          npm install
+          npm run build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dashboard/dist
+
+  # ---------------------------------------------------
+  # JOB 3: DEPLOY BACKEND TO VPS (SSH)
+  # ---------------------------------------------------
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend] # صبر میکند تا فرانت تمام شود (اختیاری)
+    steps:
+      - name: Deploy to VPS using SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            # 1. رفتن به پوشه پروژه
+            cd ~/telegram-bot
+            
+            # 2. دریافت آخرین تغییرات
+            git reset --hard
+            git pull origin main
+            
+            # 3. فعال‌سازی محیط کاندا (روش خاص برای SSH)
+            source ~/miniconda3/etc/profile.d/conda.sh
+            conda activate tg_bot
+            
+            # 4. آپدیت پکیج‌ها
+            pip install -r requirements.txt
+            
+            # 5. کشتن پروسه‌های قبلی (API و Worker)
+            # از || true استفاده میکنیم که اگر پروسه‌ای نبود ارور ندهد
+            pkill -f "run_api.py" || true
+            pkill -f "run_worker.py" || true
+            
+            # 6. اجرای مجدد با nohup (برای پایدار ماندن بعد از قطع SSH)
+            # لاگ‌ها در api.log و worker.log ذخیره می‌شوند
+            nohup python run_api.py > api.log 2>&1 &
+            nohup python run_worker.py > worker.log 2>&1 &
+            
+            echo "Deployment Successful! Services restarted."

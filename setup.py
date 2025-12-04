@@ -1,17 +1,17 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="telegram-management-dashboard",
-    version="0.1.0",  # این عدد توسط اسکریپت‌ها آپدیت می‌شود
+    name="lenzit",  # <--- نام پکیج شما در PyPI
+    version="0.1.0",  # یادتان باشد برای هر آپدیت جدید، این عدد را زیاد کنید (مثلا 0.1.1)
     packages=find_packages(),
     install_requires=[
         "fastapi",
         "uvicorn",
         "sqlalchemy",
         "telethon",
-        # سایر وابستگی‌هایت را اینجا اضافه کن
+        # سایر وابستگی‌ها
     ],
     author="Mohammad Web",
     author_email="mohmmadweb@gmail.com",
-    description="A comprehensive Telegram Automation Dashboard",
+    description="Lenzit Telegram Automation Dashboard",
 )
