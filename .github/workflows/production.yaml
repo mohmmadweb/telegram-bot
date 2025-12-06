@@ -130,7 +130,7 @@ jobs:
         env:
           API_URL: ${{ secrets.VITE_API_URL }}
         run: |
-          echo "Waiting for API to initialize..."
+          echo "Waiting for API to initializze..."
           sleep 15
           
           echo "Checking connectivity to docs endpoint: $API_URL/docs"
